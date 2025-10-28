@@ -43,6 +43,12 @@ var queueSettings = enableQueue ? { AzureWebJobsStorage__queueServiceUri: stg.pr
 var tableSettings = enableTable ? { AzureWebJobsStorage__tableServiceUri: stg.properties.primaryEndpoints.table } : {}
 var fileSettings = enableFile ? { AzureWebJobsStorage__fileServiceUri: stg.properties.primaryEndpoints.file } : {}
 
+// Add storage account name and client ID for Table Storage SDK
+var storageSettings = {
+  STORAGE_ACCOUNT_NAME: storageAccountName
+  AZURE_CLIENT_ID: identityClientId
+}
+
 // Merge all app settings
 var allAppSettings = union(
   appSettings,
@@ -50,6 +56,7 @@ var allAppSettings = union(
   queueSettings,
   tableSettings,
   fileSettings,
+  storageSettings,
   baseAppSettings
 )
 
