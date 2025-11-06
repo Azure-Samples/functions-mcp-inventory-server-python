@@ -32,120 +32,64 @@ You can initialize a project from this `azd` template in one of these ways:
   ```
   You can also clone the repository from your own fork in GitHub.
 
-## Prepare your local environment
 
-1. Navigate to the app folder and create a file in that folder named `local.settings.json` that contains this JSON data:
+### Sample Data 
 
-    ```json
-    {
-        "IsEncrypted": false,
-        "Values": {
-            "FUNCTIONS_WORKER_RUNTIME": "python"
-        }
-    }
+  ```python
+  SAMPLE_INVENTORY = [
+      {
+          "id": 1,
+          "name": "Navy Single-Breasted Slim Fit Formal Blazer",
+          "category": "Jackets",
+          "price": 89.99,
+          "description": "Tailored navy blazer with notch lapels",
+          "sizes": {
+              "XS": 0, "S": 0, "M": 0, "L": 0, "XL": 0, "XXL": 0, "XXXL": 0
+          }
+      },
+      # More items...
+  ]
+```
+## Deployment 
+
+1. This sample uses Visual Studio Code as the main client. Configure it as an allowed client application:
+    ```shell
+    azd env set PRE_AUTHORIZED_CLIENT_IDS aebc6443-996d-45c2-90f0-388ff96faa56
     ```
-2. Create a Python virtual environment and activate it 
 
-## Run your app from the terminal
+1. Specify a service management reference if required by your organization. If you're not a Microsoft employee and don't know that you need to set this, you can skip this step. However, if provisioning fails with an error about a missing service management reference, you may need to revisit this step. Microsoft employees using a Microsoft tenant must provide a service management reference (your Service Tree ID). Without this, you won't be able to create the Entra app registration, and provisioning will fail.
+    ```shell
+    azd env set SERVICE_MANAGEMENT_REFERENCE <service-management-reference>
+    ```
 
-1. From the app folder, install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+1. Run `azd up` in the root directory. 
 
-2. Start the Functions host locally:
-   ```bash
-   func start
-   ```
+    You're prompted to supply these required deployment parameters:
 
-3. The MCP server will be available at `http://localhost:7071/mcp` and will accept MCP protocol requests. The server provides the following tools:
-   - `add_item`: Add a new clothing item to inventory
-   - `get_inventory`: Get all items with their sizes and quantities
-   - `get_item_by_id`: Get details of a specific item
-   - `search_items`: Search items by name or category
-   - `update_item_quantity`: Update stock quantity for specific item and size
+    | Parameter | Description |
+    |-----------|-------------|
+    | Environment name | An environment that's used to maintain a unique deployment context for your app. You won't be prompted if you created the local project using azd init. |
+    | Azure subscription | Subscription in which your resources are created. |
+    | Azure location | Azure region in which to create the resource group that contains the new Azure resources. Only regions that currently support the Flex Consumption plan are shown. |
 
-4. Connect to the MCP server by going to _mcp.json_ (inside _.vscode/_) and clicking **start** button above the local server. 
+    When the deployment finishes, your terminal will display output similar to the following:
 
-5. Test the server by opening VSCode Copilot in agent mode and asking it questions related to clothing inventory.
+    ```shell
+      (✓) Done: Resource group: rg-resource-group-name (12.061s)
+      (✓) Done: App Service plan: plan-random-guid (6.748s)
+      (✓) Done: Virtual Network: vnet-random-guid (8.566s)
+      (✓) Done: Log Analytics workspace: log-random-guid (29.422s)
+      (✓) Done: Storage account: strandomguid (34.527s)
+      (✓) Done: Application Insights: appi-random-guid (8.625s)
+      (✓) Done: Function App: func-mcp-random-guid (36.096s)
+      (✓) Done: Private Endpoint: blob-private-endpoint (30.67s)
 
-6. When you're done, press Ctrl+C in the terminal window to stop the app
+      Deploying services (azd deploy)
+      (✓) Done: Deploying service api
+      - Endpoint: https://functionapp-name.azurewebsites.net/
+    ```
 
-## Run your app using Visual Studio Code
-
-1. Open the app folder in a new terminal.
-2. Run the `code .` command to open the project in Visual Studio Code.
-3. Install Python dependencies by running `pip install -r requirements.txt` in the terminal.
-4. Press Run/Debug (F5) to run in the debugger. Select Debug anyway if prompted about local emulator not running.
-5. The MCP server will be available at `http://localhost:7071/mcp` and ready to accept MCP protocol requests.
-
-### Data Management
-
-The server uses SQLite for local data persistence with automatic initialization from sample data. The inventory data is stored in two tables:
-- `items`: Core item information (name, category, price, description)
-- `item_sizes`: Size-specific quantities for each item
-
-### Sample Data (`inventory_data.py`)
-
-The server includes sample clothing inventory data that's automatically loaded into the database. You can modify this file to customize the initial inventory:
-
-```python
-SAMPLE_INVENTORY = [
-    {
-        "id": 1,
-        "name": "Navy Single-Breasted Slim Fit Formal Blazer",
-        "category": "Jackets",
-        "price": 89.99,
-        "description": "Tailored navy blazer with notch lapels",
-        "sizes": {
-            "XS": 0, "S": 0, "M": 0, "L": 0, "XL": 0, "XXL": 0, "XXXL": 0
-        }
-    },
-    # More items...
-]
-```
-
-## Deploy to Azure
-
-Run this command to provision the function app, with any required Azure resources, and deploy your code:
-
-```bash
-azd up
-```
-
-By default, this sample prompts to enable a virtual network for enhanced security. If you want to deploy without a virtual network without prompting, you can configure `VNET_ENABLED` to `false` before running `azd up`:
-
-```bash
-azd env set VNET_ENABLED false
-azd up
-```
-
-You're prompted to supply these required deployment parameters:
-
-| Parameter | Description |
-|-----------|-------------|
-| Environment name | An environment that's used to maintain a unique deployment context for your app. You won't be prompted if you created the local project using azd init. |
-| Azure subscription | Subscription in which your resources are created. |
-| Azure location | Azure region in which to create the resource group that contains the new Azure resources. Only regions that currently support the Flex Consumption plan are shown. |
-
-## Test deployed app
-
-Once deployment is done, test the MCP server by making requests to the deployed endpoint. To get the endpoint quickly, run the following:
-
-```bash
-az functionapp function list --resource-group <resource-group-name> --name <function-app-name> --query "[].{name:name, url:invokeUrlTemplate}" --output table
-```
-
-The MCP server endpoint should look like:
-
-```
-https://<function-app-name>.azurewebsites.net/mcp
-```
-
-## Server authentication
-Sample server currently has anonymous access, which is not secured. Will add authentication layer soon!
-
-## Redeploy your code
+### Redeploy your code
 
 You can run the `azd up` command as many times as you need to both provision your Azure resources and deploy code updates to your function app.
 
