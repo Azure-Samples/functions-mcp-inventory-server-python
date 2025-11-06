@@ -21,11 +21,9 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastMCP server
 # Tell Functions host which port to listen to
-# mcp_port = int(os.environ.get("FUNCTIONS_CUSTOMHANDLER_PORT", 8080))
 mcp = FastMCP(
     name="clothing-inventory-server",
     stateless_http=True,
-    # port=mcp_port
 )
 
 # Azure Table Storage configuration
