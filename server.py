@@ -2,16 +2,17 @@
 Clothing Store Inventory MCP Server
 
 A simple, standalone FastMCP server for managing clothing store inventory.
-Uses streamable HTTP transport and is designed to be stateless for remote hosting.
+Uses streamable HTTP transport and Azure Table Storage for persistent data.
 """
 
-import sqlite3
 import logging
 import os
-from pathlib import Path
+import json
 from typing import Dict, Any, List, Optional
 
 from mcp.server.fastmcp import FastMCP
+from azure.data.tables import TableServiceClient, TableClient
+from azure.identity import DefaultAzureCredential
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,147 +21,126 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastMCP server
 # Tell Functions host which port to listen to
-mcp_port = int(os.environ.get("FUNCTIONS_CUSTOMHANDLER_PORT", 8080))
+# mcp_port = int(os.environ.get("FUNCTIONS_CUSTOMHANDLER_PORT", 8080))
 mcp = FastMCP(
     name="clothing-inventory-server",
     stateless_http=True,
-    port=mcp_port
+    # port=mcp_port
 )
 
-def get_db_path() -> str:
-    # Get the path to the database file
-    return str(Path(__file__).parent / "inventory.db")
+# Azure Table Storage configuration
+STORAGE_ACCOUNT_NAME = os.environ.get("STORAGE_ACCOUNT_NAME", "")
+MANAGED_IDENTITY_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "")
+TABLE_NAME = "ClothingInventory"
+table_client: Optional[TableClient] = None
 
-def get_inventory_data_path() -> str:
-    # Get the path to the inventory data file.
-    return str(Path(__file__).parent / "inventory_data.py")
+def get_table_client() -> TableClient:
+    """Get or create the Table Storage client."""
+    global table_client
+    
+    if table_client is None:
+        if not STORAGE_ACCOUNT_NAME:
+            raise ValueError("STORAGE_ACCOUNT_NAME environment variable not set")
+        
+        account_url = f"https://{STORAGE_ACCOUNT_NAME}.table.core.windows.net"
+        
+        # Use managed identity with explicit client ID
+        from azure.identity import ManagedIdentityCredential
+        if MANAGED_IDENTITY_CLIENT_ID:
+            logger.info(f"Using ManagedIdentityCredential with client_id: {MANAGED_IDENTITY_CLIENT_ID[:8]}...")
+            credential = ManagedIdentityCredential(client_id=MANAGED_IDENTITY_CLIENT_ID)
+        else:
+            logger.warning("No client ID found, using default ManagedIdentityCredential")
+            credential = ManagedIdentityCredential()
+        
+        # Create table client directly
+        table_client = TableClient(
+            endpoint=account_url,
+            table_name=TABLE_NAME,
+            credential=credential
+        )
+        
+        # Create table if it doesn't exist
+        try:
+            table_client.create_table()
+            logger.info(f"Created table: {TABLE_NAME}")
+        except Exception as e:
+            # Table might already exist
+            logger.info(f"Table {TABLE_NAME} status: {e}")
+    
+    return table_client
 
-def init_database():
-    # Initialize database with sample data if it doesn't exist.
-    db_path = get_db_path()
-    inventory_data_path = get_inventory_data_path()
-    needs_reload = False
-    
-    # Check if inventory_data.py was modified after the database was created
-    if Path(db_path).exists() and Path(inventory_data_path).exists():
-        db_mtime = os.path.getmtime(db_path)
-        inventory_mtime = os.path.getmtime(inventory_data_path)
+def init_inventory():
+    """Initialize Table Storage with sample data if empty."""
+    try:
+        client = get_table_client()
         
-        if inventory_mtime > db_mtime:
-            print(f"inventory_data.py was updated (modified at {inventory_mtime} vs DB at {db_mtime})")
-            print("Reloading database with fresh data")
-            needs_reload = True
-            
-    import importlib
-    import inventory_data
-    importlib.reload(inventory_data)
-    from inventory_data import SAMPLE_INVENTORY
-    data_to_use = SAMPLE_INVENTORY
-    
-    # Initialize database
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Create tables
-        # Create tables
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            category TEXT NOT NULL,
-            price REAL NOT NULL,
-            description TEXT
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS item_sizes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_id INTEGER,
-            size TEXT NOT NULL,
-            quantity INTEGER NOT NULL,
-            FOREIGN KEY (item_id) REFERENCES items (id)
-        )
-    ''')
-    
-    # Clear existing data if the inventory file is newer or if DB is empty
-    cursor.execute('SELECT COUNT(*) FROM items')
-    if needs_reload or cursor.fetchone()[0] == 0:
-        # Clear existing data if needed
-        cursor.execute('DELETE FROM item_sizes')
-        cursor.execute('DELETE FROM items')
+        # Check if table has any data
+        entities = list(client.list_entities(select="PartitionKey"))
         
-        # Insert sample data
-        for item in data_to_use:
-            cursor.execute('''
-                INSERT INTO items (id, name, category, price, description)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (item['id'], item['name'], item['category'], item['price'], item['description']))
+        if len(entities) == 0:
+            # Load sample data
+            import importlib
+            import inventory_data
+            importlib.reload(inventory_data)
+            from inventory_data import SAMPLE_INVENTORY
             
-            for size, quantity in item['sizes'].items():
-                cursor.execute('''
-                    INSERT INTO item_sizes (item_id, size, quantity)
-                    VALUES (?, ?, ?)
-                ''', (item['id'], size, quantity))
-                
-        print(f"Database reinitialized with {len(data_to_use)} items")
-    else:
-        print("Database already contains data, no reload needed")
-    
-    conn.commit()
-    conn.close()
+            # Insert sample data into Table Storage
+            for item in SAMPLE_INVENTORY:
+                entity = {
+                    "PartitionKey": "INVENTORY",
+                    "RowKey": str(item['id']),
+                    "ItemId": item['id'],
+                    "Name": item['name'],
+                    "Category": item['category'],
+                    "Price": item['price'],
+                    "Description": item['description'],
+                    "Sizes": json.dumps(item['sizes'])  # Store sizes as JSON string
+                }
+                client.upsert_entity(entity)
+            
+            logger.info(f"Table Storage initialized with {len(SAMPLE_INVENTORY)} items")
+        else:
+            logger.info(f"Table Storage already contains {len(entities)} items")
+            
+    except Exception as e:
+        logger.error(f"Error initializing Table Storage: {e}")
+        # Don't raise - allow the server to start and initialize on first request
+        logger.warning("Table Storage initialization deferred")
 
 # FastMCP Tools
 @mcp.tool()
 def get_inventory() -> Dict[str, Any]:
     """Get all clothing items in inventory with sizes and quantities."""
-
-    db_path = get_db_path()
-    conn = None
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        client = get_table_client()
+        entities = list(client.query_entities("PartitionKey eq 'INVENTORY'"))
         
-        cursor.execute('''
-            SELECT i.id, i.name, i.category, i.price, i.description
-            FROM items i
-            ORDER BY i.category, i.name
-        ''')
-        items = cursor.fetchall()
+        # If empty, try to initialize
+        if len(entities) == 0:
+            logger.info("No inventory found, initializing...")
+            init_inventory()
+            entities = list(client.query_entities("PartitionKey eq 'INVENTORY'"))
         
-        result = []
-        for item in items:
-            item_id, name, category, price, description = item
-            
-            # Get sizes and quantities
-            cursor.execute('''
-                SELECT size, quantity
-                FROM item_sizes
-                WHERE item_id = ?
-            ''', (item_id,))
-            sizes_data = cursor.fetchall()
-            sizes = {size: quantity for size, quantity in sizes_data}
-            
-            result.append({
-                'id': item_id,
-                'name': name,
-                'category': category,
-                'price': price,
-                'description': description,
-                'sizes': sizes
+        items = []
+        for entity in entities:
+            items.append({
+                'id': entity['ItemId'],
+                'name': entity['Name'],
+                'category': entity['Category'],
+                'price': entity['Price'],
+                'description': entity['Description'],
+                'sizes': json.loads(entity['Sizes'])
             })
         
         return {
-            "items": result,
-            "total_items": len(result),
-            "categories": list(set(item['category'] for item in result))
+            "items": items,
+            "total_items": len(items),
+            "categories": list(set(item['category'] for item in items))
         }
     except Exception as e:
         logger.error(f"Error getting inventory: {e}")
         return {"error": str(e), "success": False}
-    finally:
-        if conn:
-            conn.close()
 
 @mcp.tool()
 def add_item(
@@ -179,40 +159,42 @@ def add_item(
         description: Item description (optional)
         sizes: Sizes and quantities (e.g., {"S": 10, "M": 15}) (optional)
     """
-    
     if sizes is None:
         sizes = {"S": 0, "M": 0, "L": 0}
     
-    db_path = get_db_path()
-    conn = None
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        client = get_table_client()
         
-        cursor.execute('''
-            INSERT INTO items (name, category, price, description)
-            VALUES (?, ?, ?, ?)
-        ''', (name, category, price, description))
+        # Get the next available ID
+        entities = list(client.query_entities("PartitionKey eq 'INVENTORY'", select="ItemId"))
+        next_id = max([e['ItemId'] for e in entities], default=0) + 1
         
-        item_id = cursor.lastrowid
+        entity = {
+            "PartitionKey": "INVENTORY",
+            "RowKey": str(next_id),
+            "ItemId": next_id,
+            "Name": name,
+            "Category": category,
+            "Price": price,
+            "Description": description,
+            "Sizes": json.dumps(sizes)
+        }
         
-        for size, quantity in sizes.items():
-            cursor.execute('''
-                INSERT INTO item_sizes (item_id, size, quantity)
-                VALUES (?, ?, ?)
-            ''', (item_id, size, quantity))
+        client.upsert_entity(entity)
         
-        conn.commit()
+        new_item = {
+            'id': next_id,
+            'name': name,
+            'category': category,
+            'price': price,
+            'description': description,
+            'sizes': sizes
+        }
         
-        item_response = get_item_by_id(item_id)
-        
-        return {"success": True, "item": item_response["item"]}
+        return {"success": True, "item": new_item}
     except Exception as e:
         logger.error(f"Error adding item: {e}")
         return {"error": str(e), "success": False}
-    finally:
-        if conn:
-            conn.close()
 
 @mcp.tool()
 def get_item_by_id(item_id: int) -> Dict[str, Any]:
@@ -221,50 +203,25 @@ def get_item_by_id(item_id: int) -> Dict[str, Any]:
     Args:
         item_id: ID of the item to retrieve
     """
-   
-    db_path = get_db_path()
-    conn = None
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        client = get_table_client()
+        entity = client.get_entity(partition_key="INVENTORY", row_key=str(item_id))
         
-        cursor.execute('''
-            SELECT i.id, i.name, i.category, i.price, i.description
-            FROM items i
-            WHERE i.id = ?
-        ''', (item_id,))
-        item = cursor.fetchone()
-        
-        if not item:
-            return {"success": False, "error": "Item not found"}
-        
-        item_id, name, category, price, description = item
-        
-        # Get sizes and quantities
-        cursor.execute('''
-            SELECT size, quantity
-            FROM item_sizes
-            WHERE item_id = ?
-        ''', (item_id,))
-        sizes_data = cursor.fetchall()
-        sizes = {size: quantity for size, quantity in sizes_data}
-        
-        result = {
-            'id': item_id,
-            'name': name,
-            'category': category,
-            'price': price,
-            'description': description,
-            'sizes': sizes
+        item = {
+            'id': entity['ItemId'],
+            'name': entity['Name'],
+            'category': entity['Category'],
+            'price': entity['Price'],
+            'description': entity['Description'],
+            'sizes': json.loads(entity['Sizes'])
         }
         
-        return {"success": True, "item": result}
+        return {"success": True, "item": item}
     except Exception as e:
+        if "ResourceNotFound" in str(type(e).__name__):
+            return {"success": False, "error": "Item not found"}
         logger.error(f"Error getting item {item_id}: {e}")
         return {"error": str(e), "success": False}
-    finally:
-        if conn:
-            conn.close()
 
 @mcp.tool()
 def update_item_quantity(item_id: int, size: str, quantity: int) -> Dict[str, Any]:
@@ -275,33 +232,38 @@ def update_item_quantity(item_id: int, size: str, quantity: int) -> Dict[str, An
         size: Size to update (e.g., "S", "M", "L")
         quantity: New quantity
     """
-   
-    db_path = get_db_path()
-    conn = None
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        client = get_table_client()
+        entity = client.get_entity(partition_key="INVENTORY", row_key=str(item_id))
         
-        cursor.execute('''
-            UPDATE item_sizes
-            SET quantity = ?
-            WHERE item_id = ? AND size = ?
-        ''', (quantity, item_id, size))
+        # Parse sizes, update the specific size, and save back
+        sizes = json.loads(entity['Sizes'])
         
-        affected_rows = cursor.rowcount
-        conn.commit()
+        if size not in sizes:
+            return {"success": False, "error": f"Size '{size}' not found for this item"}
         
-        if affected_rows > 0:
-            item_response = get_item_by_id(item_id)
-            return {"success": True, "item": item_response["item"]}
-        else:
-            return {"success": False, "error": "Item or size not found"}
+        sizes[size] = quantity
+        entity['Sizes'] = json.dumps(sizes)
+        
+        # Update the entity
+        client.update_entity(entity, mode="replace")
+        
+        # Return the updated item
+        item = {
+            'id': entity['ItemId'],
+            'name': entity['Name'],
+            'category': entity['Category'],
+            'price': entity['Price'],
+            'description': entity['Description'],
+            'sizes': sizes
+        }
+        
+        return {"success": True, "item": item}
     except Exception as e:
+        if "ResourceNotFound" in str(type(e).__name__):
+            return {"success": False, "error": "Item not found"}
         logger.error(f"Error updating quantity: {e}")
         return {"error": str(e), "success": False}
-    finally:
-        if conn:
-            conn.close()
 
 @mcp.tool()
 def search_items(query: str) -> Dict[str, Any]:
@@ -310,21 +272,32 @@ def search_items(query: str) -> Dict[str, Any]:
     Args:
         query: Search query to match against item names or categories
     """
-   
-    all_items_response = get_inventory()
-    all_items = all_items_response["items"]  # Extract the items list from the response
-    query = query.lower()
-    
-    results = [
-        item for item in all_items
-        if query in item['name'].lower() or query in item['category'].lower()
-    ]
-    
-    return {
-        "items": results,
-        "count": len(results),
-        "query": query
-    }
+    try:
+        client = get_table_client()
+        entities = client.query_entities("PartitionKey eq 'INVENTORY'")
+        
+        query_lower = query.lower()
+        results = []
+        
+        for entity in entities:
+            if query_lower in entity['Name'].lower() or query_lower in entity['Category'].lower():
+                results.append({
+                    'id': entity['ItemId'],
+                    'name': entity['Name'],
+                    'category': entity['Category'],
+                    'price': entity['Price'],
+                    'description': entity['Description'],
+                    'sizes': json.loads(entity['Sizes'])
+                })
+        
+        return {
+            "items": results,
+            "count": len(results),
+            "query": query
+        }
+    except Exception as e:
+        logger.error(f"Error searching items: {e}")
+        return {"error": str(e), "success": False}
     
 def main():
     """Run the Clothing Inventory MCP Server."""
@@ -332,16 +305,13 @@ def main():
     try:
         
         logger.info("Starting Clothing Inventory MCP Server")
-        logger.info(f"MCP Server will start on port {mcp_port}")
+        logger.info(f"MCP Server will start on default port 8000")
         
-        # Initialize database
+        # Initialize Table Storage (non-blocking - errors are logged but don't stop startup)
         try:
-            init_database()
-            logger.info("Database initialized successfully")
+            init_inventory()
         except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
-            logger.error(f"Database error type: {type(e).__name__}")
-            raise
+            logger.error(f"Table Storage initialization failed, will retry on first request: {e}")
         
         # Run the server
         logger.info("Starting MCP server with streamable-http transport")
